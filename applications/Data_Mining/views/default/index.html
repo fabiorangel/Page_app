@@ -37,17 +37,13 @@
     <th>Pontuação</th>
     
   </tr>
+  {{for i in range(len(nomes)):}}
   <tr>
-    <td>1</td>
-    <td>{{=errormsg}}</td>
-    <td>Maria Anders</td>
+    <td>{{=i+1}}</td>
+    <td>{{=pontos[i]}}</td>
+    <td>{{=nomes[i]}}</td>
   </tr>
-
-  <tr>
-    <td>2</td>
-    <td>Alfreds Futterkiste</td>
-    <td>Maria Anders</td>
-  </tr>
+  {{pass}}
   
 </table>
 

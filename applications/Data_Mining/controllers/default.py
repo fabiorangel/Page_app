@@ -7,10 +7,11 @@
 # - user is required for authentication and authorization
 # - download is for downloading files uploaded in the db (does streaming)
 # -------------------------------------------------------------------------
-
+import os
 
 def index():
     import pymongo
+    from sklearn import metrics
     client = pymongo.MongoClient("localhost", 27017)
     db = client.datamining
     query = db.ranking.find()
@@ -30,14 +31,15 @@ def index():
 
     
     passwd = request.vars.password
-    file = request.vars.fileToUpload
+    f = request.vars.fileToUpload
 
     errormsg = ''
 
     if passwd != None:
         try:
             query2 = db.ranking.find({"passwd": int(passwd)})[0]
-            query2['dupla']
+            points_open = query2['points_open']
+            points_hidden = query2['points_hidden']
 
         except IndexError:
             errormsg = "Grupo inexistente. Verifique a chave."
@@ -46,11 +48,15 @@ def index():
             errormsg = "Dupla precisa ser inteiro."
 
         try:
-            errormsg = file.read()
+            ypred = [float(x) for x in f.file.readlines()]
+            y = [float(x) for x in open(os.path.dirname(os.path.abspath(__file__))+'/../labels.csv').readlines()]
+            open_auc = metrics.roc_auc_score(y[:len(y)/2], ypred[:len(y)/2])
+            closed_auc = metrics.roc_auc_score(y[len(y)/2:], ypred[len(y)/2:])
+            db.ranking.update({"passwd": int(passwd)},{'points_hidden': points_hidden.append(closed_auc)},{'points_open': points_open.append(closed_auc)})
 
 
         except Exception as e:
-            errormsg = e        
+            errormsg = "formato inválido"
             pass
 
     return dict(nomes=nomes, pontos=pontos, errormsg=errormsg)
