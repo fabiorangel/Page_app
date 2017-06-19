@@ -1,0 +1,55 @@
+{{left_sidebar_enabled,right_sidebar_enabled=False,('message' in globals())}}
+{{extend 'layout.html'}}
+
+<body>
+
+  <div id="formulario">
+
+    <form id="form1" enctype="multipart/form-data" method="post">
+        <input type="text" size="30" name="password" />
+        <input type="submit" name="submit" value="send"/>
+        <input type="file" name="fileToUpload" id="fileToUpload">
+    </form>
+
+    <style>
+    table {
+        font-family: arial, sans-serif;
+        border-collapse: collapse;
+        width: 50%;
+    }
+
+    td, th {
+        border: 1px solid #dddddd;
+        text-align: left;
+        padding: 8px;
+    }
+
+    tr:nth-child(even) {
+        background-color: #dddddd;
+    }
+    </style>
+<br>
+<br>
+<table>
+  <tr>
+    <th>Posição</th>
+    <th>Dupla</th>
+    <th>Pontuação</th>
+    
+  </tr>
+  <tr>
+    <td>1</td>
+    <td>{{=errormsg}}</td>
+    <td>Maria Anders</td>
+  </tr>
+
+  <tr>
+    <td>2</td>
+    <td>Alfreds Futterkiste</td>
+    <td>Maria Anders</td>
+  </tr>
+  
+</table>
+
+  </div>
+</body>

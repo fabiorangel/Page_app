@@ -22,7 +22,7 @@ import decimal
 import unicodedata
 from cStringIO import StringIO
 from gluon.utils import simple_hash, web2py_uuid, DIGEST_ALG_BY_SIZE
-from gluon.dal import FieldVirtual, FieldMethod
+from pydal.objects import Field, FieldVirtual, FieldMethod
 
 regex_isint = re.compile('^[+-]?\d+$')
 
@@ -141,7 +141,6 @@ class Validator(object):
 
     def __call__(self, value):
         raise NotImplementedError
-        return (value, None)
 
 
 class IS_MATCH(Validator):
@@ -190,9 +189,9 @@ class IS_MATCH(Validator):
             if not expression.endswith('$'):
                 expression = '(%s)$' % expression
         if is_unicode:
-            if not isinstance(expression,unicode):
+            if not isinstance(expression, unicode):
                 expression = expression.decode('utf8')
-            self.regex = re.compile(expression,re.UNICODE)
+            self.regex = re.compile(expression, re.UNICODE)
         else:
             self.regex = re.compile(expression)
         self.error_message = error_message
@@ -200,10 +199,16 @@ class IS_MATCH(Validator):
         self.is_unicode = is_unicode
 
     def __call__(self, value):
-        if self.is_unicode and not isinstance(value,unicode):
-            match = self.regex.search(str(value).decode('utf8'))
+        if self.is_unicode:
+            if not isinstance(value, unicode):
+                match = self.regex.search(str(value).decode('utf8'))
+            else:
+                match = self.regex.search(value)
         else:
-            match = self.regex.search(str(value))
+            if not isinstance(value, unicode):
+                match = self.regex.search(str(value))
+            else:
+                match = self.regex.search(value.encode('utf8'))
         if match is not None:
             return (self.extract and match.group() or value, None)
         return (value, translate(self.error_message))
@@ -348,6 +353,7 @@ class IS_LENGTH(Validator):
         return (value, translate(self.error_message)
                 % dict(min=self.minsize, max=self.maxsize))
 
+
 class IS_JSON(Validator):
     """
     Example:
@@ -370,14 +376,14 @@ class IS_JSON(Validator):
     def __call__(self, value):
         try:
             if self.native_json:
-                simplejson.loads(value) # raises error in case of malformed json
-                return (value, None) #  the serialized value is not passed
+                simplejson.loads(value)  # raises error in case of malformed json
+                return (value, None)  # the serialized value is not passed
             else:
                 return (simplejson.loads(value), None)
         except JSONErrors:
             return (value, translate(self.error_message))
 
-    def formatter(self,value):
+    def formatter(self, value):
         if value is None:
             return None
         if self.native_json:
@@ -453,7 +459,7 @@ class IS_IN_SET(Validator):
 
     def __call__(self, value):
         if self.multiple:
-            ### if below was values = re.compile("[\w\-:]+").findall(str(value))
+            # if below was values = re.compile("[\w\-:]+").findall(str(value))
             if not value:
                 values = []
             elif isinstance(value, (tuple, list)):
@@ -465,8 +471,6 @@ class IS_IN_SET(Validator):
         thestrset = [str(x) for x in self.theset]
         failures = [x for x in values if not str(x) in thestrset]
         if failures and self.theset:
-            if self.multiple and (value is None or value == ''):
-                return ([], None)
             return (value, translate(self.error_message))
         if self.multiple:
             if isinstance(self.multiple, (tuple, list)) and \
@@ -505,33 +509,44 @@ class IS_IN_DB(Validator):
         zero='',
         sort=False,
         _and=None,
+        left=None,
+        delimiter=None,
+        auto_add=False,
     ):
-        from dal import Table
-        if isinstance(field, Table):
-            field = field._id
-
+        from pydal.objects import Table
         if hasattr(dbset, 'define_table'):
             self.dbset = dbset()
         else:
             self.dbset = dbset
+
+        if isinstance(field, Table):
+            field = field._id
+        elif isinstance(field, str):
+            items = field.split('.')
+            if len(items) == 1:
+                field = items[0] + '.id'
+
         (ktable, kfield) = str(field).split('.')
         if not label:
             label = '%%(%s)s' % kfield
         if isinstance(label, str):
             if regex1.match(str(label)):
                 label = '%%(%s)s' % str(label).split('.')[-1]
-            ks = regex2.findall(label)
-            if not kfield in ks:
-                ks += [kfield]
-            fields = ks
+            fieldnames = regex2.findall(label)
+            if kfield not in fieldnames:
+                fieldnames.append(kfield)  # kfield must be last
+        elif isinstance(label, Field):
+            fieldnames = [label.name, kfield]  # kfield must be last
+            label = '%%(%s)s' % label.name
+        elif callable(label):
+            fieldnames = '*'
         else:
-            ks = [kfield]
-            fields = 'all'
-        self.fields = fields
+            raise NotImplementedError
+
+        self.fieldnames = fieldnames  # fields requires to build the formatting
         self.label = label
         self.ktable = ktable
         self.kfield = kfield
-        self.ks = ks
         self.error_message = error_message
         self.theset = None
         self.orderby = orderby
@@ -542,6 +557,9 @@ class IS_IN_DB(Validator):
         self.zero = zero
         self.sort = sort
         self._and = _and
+        self.left = left
+        self.delimiter = delimiter
+        self.auto_add = auto_add
 
     def set_self_id(self, id):
         if self._and:
@@ -549,19 +567,20 @@ class IS_IN_DB(Validator):
 
     def build_set(self):
         table = self.dbset.db[self.ktable]
-        if self.fields == 'all':
+        if self.fieldnames == '*':
             fields = [f for f in table]
         else:
-            fields = [table[k] for k in self.fields]
-        ignore = (FieldVirtual,FieldMethod)
-        fields = filter(lambda f:not isinstance(f,ignore), fields)
+            fields = [table[k] for k in self.fieldnames]
+        ignore = (FieldVirtual, FieldMethod)
+        fields = filter(lambda f: not isinstance(f, ignore), fields)
         if self.dbset.db._dbname != 'gae':
             orderby = self.orderby or reduce(lambda a, b: a | b, fields)
             groupby = self.groupby
             distinct = self.distinct
+            left = self.left
             dd = dict(orderby=orderby, groupby=groupby,
                       distinct=distinct, cache=self.cache,
-                      cacheable=True)
+                      cacheable=True, left=left)
             records = self.dbset(table).select(*fields, **dd)
         else:
             orderby = self.orderby or \
@@ -580,52 +599,88 @@ class IS_IN_DB(Validator):
         items = [(k, self.labels[i]) for (i, k) in enumerate(self.theset)]
         if self.sort:
             items.sort(options_sorter)
-        if zero and not self.zero is None and not self.multiple:
+        if zero and self.zero is not None and not self.multiple:
             items.insert(0, ('', self.zero))
         return items
+
+    def maybe_add(self, table, fieldname, value):
+        d = {fieldname: value}
+        record = table(**d)
+        if record:
+            return record.id
+        else:
+            return table.insert(**d)
 
     def __call__(self, value):
         table = self.dbset.db[self.ktable]
         field = table[self.kfield]
+
         if self.multiple:
             if self._and:
                 raise NotImplementedError
             if isinstance(value, list):
                 values = value
+            elif self.delimiter:
+                values = value.split(self.delimiter)  # because of autocomplete
             elif value:
                 values = [value]
             else:
                 values = []
+
+            if field.type in ('id', 'integer'):
+                new_values = []
+                for value in values:
+                    if not (isinstance(value, (int, long)) or value.isdigit()):
+                        if self.auto_add:
+                            value = str(self.maybe_add(table, self.fieldnames[0], value))
+                        else:
+                            return (values, translate(self.error_message))
+                    new_values.append(value)
+                values = new_values
+
             if isinstance(self.multiple, (tuple, list)) and \
                     not self.multiple[0] <= len(values) < self.multiple[1]:
                 return (values, translate(self.error_message))
             if self.theset:
-                if not [v for v in values if not v in self.theset]:
+                if not [v for v in values if v not in self.theset]:
                     return (values, None)
             else:
-                from dal import GoogleDatastoreAdapter
-
                 def count(values, s=self.dbset, f=field):
                     return s(f.belongs(map(int, values))).count()
-                if isinstance(self.dbset.db._adapter, GoogleDatastoreAdapter):
+
+                if self.dbset.db._adapter.dbengine == "google:datastore":
                     range_ids = range(0, len(values), 30)
                     total = sum(count(values[i:i + 30]) for i in range_ids)
                     if total == len(values):
                         return (values, None)
                 elif count(values) == len(values):
                     return (values, None)
-        elif self.theset:
-            if str(value) in self.theset:
-                if self._and:
-                    return self._and(value)
-                else:
-                    return (value, None)
         else:
-            if self.dbset(field == value).count():
-                if self._and:
-                    return self._and(value)
+            if field.type in ('id', 'integer'):
+                if isinstance(value, (int, long)) or value.isdigit():
+                    value = int(value)
+                elif self.auto_add:
+                    value = self.maybe_add(table, self.fieldnames[0], value)
                 else:
-                    return (value, None)
+                    return (value, translate(self.error_message))
+
+                try:
+                    value = int(value)
+                except TypeError:
+                    return (values, translate(self.error_message))
+
+            if self.theset:
+                if str(value) in self.theset:
+                    if self._and:
+                        return self._and(value)
+                    else:
+                        return (value, None)
+            else:
+                if self.dbset(field == value).count():
+                    if self._and:
+                        return self._and(value)
+                    else:
+                        return (value, None)
         return (value, translate(self.error_message))
 
 
@@ -648,7 +703,7 @@ class IS_NOT_IN_DB(Validator):
         ignore_common_filters=False,
     ):
 
-        from dal import Table
+        from pydal.objects import Table
         if isinstance(field, Table):
             field = field._id
 
@@ -666,7 +721,7 @@ class IS_NOT_IN_DB(Validator):
         self.record_id = id
 
     def __call__(self, value):
-        if isinstance(value,unicode):
+        if isinstance(value, unicode):
             value = value.encode('utf8')
         else:
             value = str(value)
@@ -687,13 +742,13 @@ class IS_NOT_IN_DB(Validator):
                 return (value, translate(self.error_message))
         else:
             row = subset.select(table._id, field, limitby=(0, 1), orderby_on_limitby=False).first()
-            if row and str(row.id) != str(id):
+            if row and str(row[table._id]) != str(id):
                 return (value, translate(self.error_message))
         return (value, None)
 
 
 def range_error_message(error_message, what_to_enter, minimum, maximum):
-    "build the error message for the number range validators"
+    """build the error message for the number range validators"""
     if error_message is None:
         error_message = 'Enter ' + what_to_enter
         if minimum is not None and maximum is not None:
@@ -762,7 +817,7 @@ class IS_INT_IN_RANGE(Validator):
         if regex_isint.match(str(value)):
             v = int(value)
             if ((self.minimum is None or v >= self.minimum) and
-                (self.maximum is None or v < self.maximum)):
+                    (self.maximum is None or v < self.maximum)):
                 return (v, None)
         return (value, self.error_message)
 
@@ -836,7 +891,7 @@ class IS_FLOAT_IN_RANGE(Validator):
             else:
                 v = float(str(value).replace(self.dot, '.'))
             if ((self.minimum is None or v >= self.minimum) and
-                (self.maximum is None or v <= self.maximum)):
+                    (self.maximum is None or v <= self.maximum)):
                 return (v, None)
         except (ValueError, TypeError):
             pass
@@ -922,7 +977,7 @@ class IS_DECIMAL_IN_RANGE(Validator):
             else:
                 v = decimal.Decimal(str(value).replace(self.dot, '.'))
             if ((self.minimum is None or v >= self.minimum) and
-                (self.maximum is None or v <= self.maximum)):
+                    (self.maximum is None or v <= self.maximum)):
                 return (v, None)
         except (ValueError, TypeError, decimal.InvalidOperation):
             pass
@@ -935,7 +990,7 @@ class IS_DECIMAL_IN_RANGE(Validator):
 
 
 def is_empty(value, empty_regex=None):
-    "test empty field"
+    """test empty field"""
     if isinstance(value, (str, unicode)):
         value = value.strip()
         if empty_regex is not None and empty_regex.match(value):
@@ -1142,13 +1197,19 @@ class IS_EMAIL(Validator):
         self.error_message = error_message
 
     def __call__(self, value):
-        match = self.regex.match(value)
+        try:
+            match = self.regex.match(value)
+        except TypeError:
+            # Value may not be a string where we can look for matches.
+            # Example: we're calling ANY_OF formatter and IS_EMAIL is asked to validate a date.
+            match = None
         if match:
             domain = value.split('@')[1]
             if (not self.banned or not self.banned.match(domain)) \
                     and (not self.forced or self.forced.match(domain)):
                 return (value, None)
         return (value, translate(self.error_message))
+
 
 class IS_LIST_OF_EMAILS(object):
     """
@@ -1163,16 +1224,14 @@ class IS_LIST_OF_EMAILS(object):
                   )
     """
     split_emails = re.compile('[^,;\s]+')
-    def __init__(self, error_message = 'Invalid emails: %s'):
+
+    def __init__(self, error_message='Invalid emails: %s'):
         self.error_message = error_message
 
     def __call__(self, value):
         bad_emails = []
-        emails = []
         f = IS_EMAIL()
         for email in self.split_emails.findall(value):
-            if not email in emails:
-                emails.append(email)
             error = f(email)[1]
             if error and not email in bad_emails:
                 bad_emails.append(email)
@@ -1182,7 +1241,7 @@ class IS_LIST_OF_EMAILS(object):
             return (value,
                     translate(self.error_message) % ', '.join(bad_emails))
 
-    def formatter(self,value,row=None):
+    def formatter(self, value, row=None):
         return ', '.join(value or [])
 
 
@@ -1334,7 +1393,7 @@ label_split_regex = re.compile(u'[\u002e\u3002\uff0e\uff61]')
 
 
 def escape_unicode(string):
-    '''
+    """
     Converts a unicode string into US-ASCII, using a simple conversion scheme.
     Each unicode character that does not have a US-ASCII equivalent is
     converted into a URL escaped form based on its hexadecimal value.
@@ -1348,7 +1407,7 @@ def escape_unicode(string):
         string: the US-ASCII escaped form of the inputted string
 
     @author: Jonathan Benn
-    '''
+    """
     returnValue = StringIO()
 
     for character in string:
@@ -1363,7 +1422,7 @@ def escape_unicode(string):
 
 
 def unicode_to_ascii_authority(authority):
-    '''
+    """
     Follows the steps in RFC 3490, Section 4 to convert a unicode authority
     string into its ASCII equivalent.
     For example, u'www.Alliancefran\xe7aise.nu' will be converted into
@@ -1382,19 +1441,19 @@ def unicode_to_ascii_authority(authority):
             authority
 
     @author: Jonathan Benn
-    '''
-    #RFC 3490, Section 4, Step 1
-    #The encodings.idna Python module assumes that AllowUnassigned == True
+    """
+    # RFC 3490, Section 4, Step 1
+    # The encodings.idna Python module assumes that AllowUnassigned == True
 
-    #RFC 3490, Section 4, Step 2
+    # RFC 3490, Section 4, Step 2
     labels = label_split_regex.split(authority)
 
-    #RFC 3490, Section 4, Step 3
-    #The encodings.idna Python module assumes that UseSTD3ASCIIRules == False
+    # RFC 3490, Section 4, Step 3
+    # The encodings.idna Python module assumes that UseSTD3ASCIIRules == False
 
-    #RFC 3490, Section 4, Step 4
-    #We use the ToASCII operation because we are about to put the authority
-    #into an IDN-unaware slot
+    # RFC 3490, Section 4, Step 4
+    # We use the ToASCII operation because we are about to put the authority
+    # into an IDN-unaware slot
     asciiLabels = []
     try:
         import encodings.idna
@@ -1402,18 +1461,18 @@ def unicode_to_ascii_authority(authority):
             if label:
                 asciiLabels.append(encodings.idna.ToASCII(label))
             else:
-                 #encodings.idna.ToASCII does not accept an empty string, but
-                 #it is necessary for us to allow for empty labels so that we
-                 #don't modify the URL
+                 # encodings.idna.ToASCII does not accept an empty string, but
+                 # it is necessary for us to allow for empty labels so that we
+                 # don't modify the URL
                 asciiLabels.append('')
     except:
         asciiLabels = [str(label) for label in labels]
-    #RFC 3490, Section 4, Step 5
+    # RFC 3490, Section 4, Step 5
     return str(reduce(lambda x, y: x + unichr(0x002E) + y, asciiLabels))
 
 
 def unicode_to_ascii_url(url, prepend_scheme):
-    '''
+    """
     Converts the inputed unicode url into a US-ASCII equivalent. This function
     goes a little beyond RFC 3490, which is limited in scope to the domain name
     (authority) only. Here, the functionality is expanded to what was observed
@@ -1443,23 +1502,23 @@ def unicode_to_ascii_url(url, prepend_scheme):
         string: a US-ASCII equivalent of the inputed url
 
     @author: Jonathan Benn
-    '''
-    #convert the authority component of the URL into an ASCII punycode string,
-    #but encode the rest using the regular URI character encoding
+    """
+    # convert the authority component of the URL into an ASCII punycode string,
+    # but encode the rest using the regular URI character encoding
 
     groups = url_split_regex.match(url).groups()
-    #If no authority was found
+    # If no authority was found
     if not groups[3]:
-        #Try appending a scheme to see if that fixes the problem
+        # Try appending a scheme to see if that fixes the problem
         scheme_to_prepend = prepend_scheme or 'http'
         groups = url_split_regex.match(
             unicode(scheme_to_prepend) + u'://' + url).groups()
-    #if we still can't find the authority
+    # if we still can't find the authority
     if not groups[3]:
         raise Exception('No authority component found, ' +
                         'could not decode unicode to US-ASCII')
 
-    #We're here if we found an authority, let's rebuild the URL
+    # We're here if we found an authority, let's rebuild the URL
     scheme = groups[1]
     authority = groups[3]
     path = groups[4] or ''
@@ -1582,300 +1641,173 @@ class IS_GENERIC_URL(Validator):
         # else the URL is not valid
         return (value, translate(self.error_message))
 
-# Sources (obtained 2008-Nov-11):
-#    http://en.wikipedia.org/wiki/Top-level_domain
-#    http://www.iana.org/domains/root/db/
+# Sources (obtained 2015-Feb-24):
+#    http://data.iana.org/TLD/tlds-alpha-by-domain.txt
+# see scripts/parse_top_level_domains.py for an easy update
 
 official_top_level_domains = [
-    'ac',
-    'ad',
-    'ae',
-    'aero',
-    'af',
-    'ag',
-    'ai',
-    'al',
-    'am',
-    'an',
-    'ao',
-    'aq',
-    'ar',
-    'arpa',
-    'as',
-    'asia',
-    'at',
-    'au',
-    'aw',
-    'ax',
-    'az',
-    'ba',
-    'bb',
-    'bd',
-    'be',
-    'bf',
-    'bg',
-    'bh',
-    'bi',
-    'biz',
-    'bj',
-    'bl',
-    'bm',
-    'bn',
-    'bo',
-    'br',
-    'bs',
-    'bt',
-    'bv',
-    'bw',
-    'by',
-    'bz',
-    'ca',
-    'cat',
-    'cc',
-    'cd',
-    'cf',
-    'cg',
-    'ch',
-    'ci',
-    'ck',
-    'cl',
-    'cm',
-    'cn',
-    'co',
-    'com',
-    'coop',
-    'cr',
-    'cu',
-    'cv',
-    'cx',
-    'cy',
+    # a
+    'abogado', 'ac', 'academy', 'accountants', 'active', 'actor',
+    'ad', 'adult', 'ae', 'aero', 'af', 'ag', 'agency', 'ai',
+    'airforce', 'al', 'allfinanz', 'alsace', 'am', 'amsterdam', 'an',
+    'android', 'ao', 'apartments', 'aq', 'aquarelle', 'ar', 'archi',
+    'army', 'arpa', 'as', 'asia', 'associates', 'at', 'attorney',
+    'au', 'auction', 'audio', 'autos', 'aw', 'ax', 'axa', 'az',
+    # b
+    'ba', 'band', 'bank', 'bar', 'barclaycard', 'barclays',
+    'bargains', 'bayern', 'bb', 'bd', 'be', 'beer', 'berlin', 'best',
+    'bf', 'bg', 'bh', 'bi', 'bid', 'bike', 'bingo', 'bio', 'biz',
+    'bj', 'black', 'blackfriday', 'bloomberg', 'blue', 'bm', 'bmw',
+    'bn', 'bnpparibas', 'bo', 'boo', 'boutique', 'br', 'brussels',
+    'bs', 'bt', 'budapest', 'build', 'builders', 'business', 'buzz',
+    'bv', 'bw', 'by', 'bz', 'bzh',
+    # c
+    'ca', 'cab', 'cal', 'camera', 'camp', 'cancerresearch', 'canon',
+    'capetown', 'capital', 'caravan', 'cards', 'care', 'career',
+    'careers', 'cartier', 'casa', 'cash', 'casino', 'cat',
+    'catering', 'cbn', 'cc', 'cd', 'center', 'ceo', 'cern', 'cf',
+    'cg', 'ch', 'channel', 'chat', 'cheap', 'christmas', 'chrome',
+    'church', 'ci', 'citic', 'city', 'ck', 'cl', 'claims',
+    'cleaning', 'click', 'clinic', 'clothing', 'club', 'cm', 'cn',
+    'co', 'coach', 'codes', 'coffee', 'college', 'cologne', 'com',
+    'community', 'company', 'computer', 'condos', 'construction',
+    'consulting', 'contractors', 'cooking', 'cool', 'coop',
+    'country', 'cr', 'credit', 'creditcard', 'cricket', 'crs',
+    'cruises', 'cu', 'cuisinella', 'cv', 'cw', 'cx', 'cy', 'cymru',
     'cz',
-    'de',
-    'dj',
-    'dk',
-    'dm',
-    'do',
-    'dz',
-    'ec',
-    'edu',
-    'ee',
-    'eg',
-    'eh',
-    'er',
-    'es',
-    'et',
-    'eu',
-    'example',
-    'fi',
-    'fj',
-    'fk',
-    'fm',
-    'fo',
-    'fr',
-    'ga',
-    'gb',
-    'gd',
-    'ge',
-    'gf',
-    'gg',
-    'gh',
-    'gi',
-    'gl',
-    'gm',
-    'gn',
-    'gov',
-    'gp',
-    'gq',
-    'gr',
-    'gs',
-    'gt',
-    'gu',
-    'gw',
-    'gy',
-    'hk',
-    'hm',
-    'hn',
-    'hr',
-    'ht',
-    'hu',
-    'id',
-    'ie',
-    'il',
-    'im',
-    'in',
-    'info',
-    'int',
-    'invalid',
-    'io',
-    'iq',
-    'ir',
-    'is',
-    'it',
-    'je',
-    'jm',
-    'jo',
-    'jobs',
-    'jp',
-    'ke',
-    'kg',
-    'kh',
-    'ki',
-    'km',
-    'kn',
-    'kp',
-    'kr',
-    'kw',
-    'ky',
-    'kz',
-    'la',
-    'lb',
-    'lc',
-    'li',
-    'lk',
-    'localhost',
-    'lr',
-    'ls',
-    'lt',
-    'lu',
-    'lv',
-    'ly',
-    'ma',
-    'mc',
-    'md',
-    'me',
-    'mf',
-    'mg',
-    'mh',
-    'mil',
-    'mk',
-    'ml',
-    'mm',
-    'mn',
-    'mo',
-    'mobi',
-    'mp',
-    'mq',
-    'mr',
-    'ms',
-    'mt',
-    'mu',
-    'museum',
-    'mv',
-    'mw',
-    'mx',
-    'my',
-    'mz',
-    'na',
-    'name',
-    'nc',
-    'ne',
-    'net',
-    'nf',
-    'ng',
-    'ni',
-    'nl',
-    'no',
-    'np',
-    'nr',
-    'nu',
-    'nz',
-    'om',
-    'org',
-    'pa',
-    'pe',
-    'pf',
-    'pg',
-    'ph',
-    'pk',
-    'pl',
-    'pm',
-    'pn',
-    'pr',
-    'pro',
-    'ps',
-    'pt',
-    'pw',
-    'py',
-    'qa',
-    're',
-    'ro',
-    'rs',
-    'ru',
-    'rw',
-    'sa',
-    'sb',
-    'sc',
-    'sd',
-    'se',
-    'sg',
-    'sh',
-    'si',
-    'sj',
-    'sk',
-    'sl',
-    'sm',
-    'sn',
-    'so',
-    'sr',
-    'st',
-    'su',
-    'sv',
-    'sy',
-    'sz',
-    'tc',
-    'td',
-    'tel',
-    'test',
-    'tf',
-    'tg',
-    'th',
-    'tj',
-    'tk',
-    'tl',
-    'tm',
-    'tn',
-    'to',
-    'tp',
-    'tr',
-    'travel',
-    'tt',
-    'tv',
-    'tw',
+    # d
+    'dabur', 'dad', 'dance', 'dating', 'day', 'dclk', 'de', 'deals',
+    'degree', 'delivery', 'democrat', 'dental', 'dentist', 'desi',
+    'design', 'dev', 'diamonds', 'diet', 'digital', 'direct',
+    'directory', 'discount', 'dj', 'dk', 'dm', 'dnp', 'do', 'docs',
+    'domains', 'doosan', 'durban', 'dvag', 'dz',
+    # e
+    'eat', 'ec', 'edu', 'education', 'ee', 'eg', 'email', 'emerck',
+    'energy', 'engineer', 'engineering', 'enterprises', 'equipment',
+    'er', 'es', 'esq', 'estate', 'et', 'eu', 'eurovision', 'eus',
+    'events', 'everbank', 'exchange', 'expert', 'exposed',
+    # f
+    'fail', 'fans', 'farm', 'fashion', 'feedback', 'fi', 'finance',
+    'financial', 'firmdale', 'fish', 'fishing', 'fit', 'fitness',
+    'fj', 'fk', 'flights', 'florist', 'flowers', 'flsmidth', 'fly',
+    'fm', 'fo', 'foo', 'football', 'forsale', 'foundation', 'fr',
+    'frl', 'frogans', 'fund', 'furniture', 'futbol',
+    # g
+    'ga', 'gal', 'gallery', 'garden', 'gb', 'gbiz', 'gd', 'gdn',
+    'ge', 'gent', 'gf', 'gg', 'ggee', 'gh', 'gi', 'gift', 'gifts',
+    'gives', 'gl', 'glass', 'gle', 'global', 'globo', 'gm', 'gmail',
+    'gmo', 'gmx', 'gn', 'goldpoint', 'goog', 'google', 'gop', 'gov',
+    'gp', 'gq', 'gr', 'graphics', 'gratis', 'green', 'gripe', 'gs',
+    'gt', 'gu', 'guide', 'guitars', 'guru', 'gw', 'gy',
+    # h
+    'hamburg', 'hangout', 'haus', 'healthcare', 'help', 'here',
+    'hermes', 'hiphop', 'hiv', 'hk', 'hm', 'hn', 'holdings',
+    'holiday', 'homes', 'horse', 'host', 'hosting', 'house', 'how',
+    'hr', 'ht', 'hu',
+    # i
+    'ibm', 'id', 'ie', 'ifm', 'il', 'im', 'immo', 'immobilien', 'in',
+    'industries', 'info', 'ing', 'ink', 'institute', 'insure', 'int',
+    'international', 'investments', 'io', 'iq', 'ir', 'irish', 'is',
+    'it', 'iwc',
+    # j
+    'jcb', 'je', 'jetzt', 'jm', 'jo', 'jobs', 'joburg', 'jp',
+    'juegos',
+    # k
+    'kaufen', 'kddi', 'ke', 'kg', 'kh', 'ki', 'kim', 'kitchen',
+    'kiwi', 'km', 'kn', 'koeln', 'kp', 'kr', 'krd', 'kred', 'kw',
+    'ky', 'kyoto', 'kz',
+    # l
+    'la', 'lacaixa', 'land', 'lat', 'latrobe', 'lawyer', 'lb', 'lc',
+    'lds', 'lease', 'legal', 'lgbt', 'li', 'lidl', 'life',
+    'lighting', 'limited', 'limo', 'link', 'lk', 'loans',
+    'localhost', 'london', 'lotte', 'lotto', 'lr', 'ls', 'lt',
+    'ltda', 'lu', 'luxe', 'luxury', 'lv', 'ly',
+    # m
+    'ma', 'madrid', 'maison', 'management', 'mango', 'market',
+    'marketing', 'marriott', 'mc', 'md', 'me', 'media', 'meet',
+    'melbourne', 'meme', 'memorial', 'menu', 'mg', 'mh', 'miami',
+    'mil', 'mini', 'mk', 'ml', 'mm', 'mn', 'mo', 'mobi', 'moda',
+    'moe', 'monash', 'money', 'mormon', 'mortgage', 'moscow',
+    'motorcycles', 'mov', 'mp', 'mq', 'mr', 'ms', 'mt', 'mu',
+    'museum', 'mv', 'mw', 'mx', 'my', 'mz',
+    # n
+    'na', 'nagoya', 'name', 'navy', 'nc', 'ne', 'net', 'network',
+    'neustar', 'new', 'nexus', 'nf', 'ng', 'ngo', 'nhk', 'ni',
+    'nico', 'ninja', 'nl', 'no', 'np', 'nr', 'nra', 'nrw', 'ntt',
+    'nu', 'nyc', 'nz',
+    # o
+    'okinawa', 'om', 'one', 'ong', 'onl', 'ooo', 'org', 'organic',
+    'osaka', 'otsuka', 'ovh',
+    # p
+    'pa', 'paris', 'partners', 'parts', 'party', 'pe', 'pf', 'pg',
+    'ph', 'pharmacy', 'photo', 'photography', 'photos', 'physio',
+    'pics', 'pictures', 'pink', 'pizza', 'pk', 'pl', 'place',
+    'plumbing', 'pm', 'pn', 'pohl', 'poker', 'porn', 'post', 'pr',
+    'praxi', 'press', 'pro', 'prod', 'productions', 'prof',
+    'properties', 'property', 'ps', 'pt', 'pub', 'pw', 'py',
+    # q
+    'qa', 'qpon', 'quebec',
+    # r
+    're', 'realtor', 'recipes', 'red', 'rehab', 'reise', 'reisen',
+    'reit', 'ren', 'rentals', 'repair', 'report', 'republican',
+    'rest', 'restaurant', 'reviews', 'rich', 'rio', 'rip', 'ro',
+    'rocks', 'rodeo', 'rs', 'rsvp', 'ru', 'ruhr', 'rw', 'ryukyu',
+    # s
+    'sa', 'saarland', 'sale', 'samsung', 'sarl', 'saxo', 'sb', 'sc',
+    'sca', 'scb', 'schmidt', 'school', 'schule', 'schwarz',
+    'science', 'scot', 'sd', 'se', 'services', 'sew', 'sexy', 'sg',
+    'sh', 'shiksha', 'shoes', 'shriram', 'si', 'singles', 'sj', 'sk',
+    'sky', 'sl', 'sm', 'sn', 'so', 'social', 'software', 'sohu',
+    'solar', 'solutions', 'soy', 'space', 'spiegel', 'sr', 'st',
+    'style', 'su', 'supplies', 'supply', 'support', 'surf',
+    'surgery', 'suzuki', 'sv', 'sx', 'sy', 'sydney', 'systems', 'sz',
+    # t
+    'taipei', 'tatar', 'tattoo', 'tax', 'tc', 'td', 'technology',
+    'tel', 'temasek', 'tennis', 'tf', 'tg', 'th', 'tienda', 'tips',
+    'tires', 'tirol', 'tj', 'tk', 'tl', 'tm', 'tn', 'to', 'today',
+    'tokyo', 'tools', 'top', 'toshiba', 'town', 'toys', 'tp', 'tr',
+    'trade', 'training', 'travel', 'trust', 'tt', 'tui', 'tv', 'tw',
     'tz',
-    'ua',
-    'ug',
-    'uk',
-    'um',
-    'us',
-    'uy',
-    'uz',
-    'va',
-    'vc',
-    've',
-    'vg',
-    'vi',
-    'vn',
-    'vu',
-    'wf',
-    'ws',
-    'xn--0zwm56d',
-    'xn--11b5bs3a9aj6g',
-    'xn--80akhbyknj4f',
-    'xn--9t4b11yi5a',
-    'xn--deba0ad',
-    'xn--g6w251d',
-    'xn--hgbk6aj7f53bba',
-    'xn--hlcj6aya9esc7a',
-    'xn--jxalpdlp',
-    'xn--kgbechtv',
-    'xn--p1ai',
-    'xn--zckzah',
-    'ye',
-    'yt',
-    'yu',
-    'za',
-    'zm',
-    'zw',
+    # u
+    'ua', 'ug', 'uk', 'university', 'uno', 'uol', 'us', 'uy', 'uz',
+    # v
+    'va', 'vacations', 'vc', 've', 'vegas', 'ventures',
+    'versicherung', 'vet', 'vg', 'vi', 'viajes', 'video', 'villas',
+    'vision', 'vlaanderen', 'vn', 'vodka', 'vote', 'voting', 'voto',
+    'voyage', 'vu',
+    # w
+    'wales', 'wang', 'watch', 'webcam', 'website', 'wed', 'wedding',
+    'wf', 'whoswho', 'wien', 'wiki', 'williamhill', 'wme', 'work',
+    'works', 'world', 'ws', 'wtc', 'wtf',
+    # x
+    'xn--1qqw23a', 'xn--3bst00m', 'xn--3ds443g', 'xn--3e0b707e',
+    'xn--45brj9c', 'xn--45q11c', 'xn--4gbrim', 'xn--55qw42g',
+    'xn--55qx5d', 'xn--6frz82g', 'xn--6qq986b3xl', 'xn--80adxhks',
+    'xn--80ao21a', 'xn--80asehdb', 'xn--80aswg', 'xn--90a3ac',
+    'xn--90ais', 'xn--b4w605ferd', 'xn--c1avg', 'xn--cg4bki',
+    'xn--clchc0ea0b2g2a9gcd', 'xn--czr694b', 'xn--czrs0t',
+    'xn--czru2d', 'xn--d1acj3b', 'xn--d1alf', 'xn--fiq228c5hs',
+    'xn--fiq64b', 'xn--fiqs8s', 'xn--fiqz9s', 'xn--flw351e',
+    'xn--fpcrj9c3d', 'xn--fzc2c9e2c', 'xn--gecrj9c', 'xn--h2brj9c',
+    'xn--hxt814e', 'xn--i1b6b1a6a2e', 'xn--io0a7i', 'xn--j1amh',
+    'xn--j6w193g', 'xn--kprw13d', 'xn--kpry57d', 'xn--kput3i',
+    'xn--l1acc', 'xn--lgbbat1ad8j', 'xn--mgb9awbf',
+    'xn--mgba3a4f16a', 'xn--mgbaam7a8h', 'xn--mgbab2bd',
+    'xn--mgbayh7gpa', 'xn--mgbbh1a71e', 'xn--mgbc0a9azcg',
+    'xn--mgberp4a5d4ar', 'xn--mgbx4cd0ab', 'xn--ngbc5azd',
+    'xn--node', 'xn--nqv7f', 'xn--nqv7fs00ema', 'xn--o3cw4h',
+    'xn--ogbpf8fl', 'xn--p1acf', 'xn--p1ai', 'xn--pgbs0dh',
+    'xn--q9jyb4c', 'xn--qcka1pmc', 'xn--rhqv96g', 'xn--s9brj9c',
+    'xn--ses554g', 'xn--unup4y', 'xn--vermgensberater-ctb',
+    'xn--vermgensberatung-pwb', 'xn--vhquv', 'xn--wgbh1c',
+    'xn--wgbl6a', 'xn--xhq521b', 'xn--xkc2al3hye2a',
+    'xn--xkc2dl3a5ee0h', 'xn--yfro4i67o', 'xn--ygbi2ammx',
+    'xn--zfr164b', 'xxx', 'xyz',
+    # y
+    'yachts', 'yandex', 'ye', 'yodobashi', 'yoga', 'yokohama',
+    'youtube', 'yt',
+    # z
+    'za', 'zip', 'zm', 'zone', 'zuerich', 'zw'
 ]
 
 
@@ -1939,6 +1871,7 @@ class IS_HTTP_URL(Validator):
         error_message='Enter a valid URL',
         allowed_schemes=None,
         prepend_scheme='http',
+        allowed_tlds=None
     ):
 
         self.error_message = error_message
@@ -1946,6 +1879,10 @@ class IS_HTTP_URL(Validator):
             self.allowed_schemes = http_schemes
         else:
             self.allowed_schemes = allowed_schemes
+        if allowed_tlds is None:
+            self.allowed_tlds = official_top_level_domains
+        else:
+            self.allowed_tlds = allowed_tlds
         self.prepend_scheme = prepend_scheme
 
         for i in self.allowed_schemes:
@@ -1989,7 +1926,7 @@ class IS_HTTP_URL(Validator):
                         if domainMatch:
                             # if the top-level domain really exists
                             if domainMatch.group(5).lower()\
-                                    in official_top_level_domains:
+                                    in self.allowed_tlds:
                                 # Then this HTTP URL is valid
                                 return (value, None)
                 else:
@@ -2114,13 +2051,18 @@ class IS_URL(Validator):
         mode='http',
         allowed_schemes=None,
         prepend_scheme='http',
+        allowed_tlds=None
     ):
 
         self.error_message = error_message
         self.mode = mode.lower()
-        if not self.mode in ['generic', 'http']:
+        if self.mode not in ['generic', 'http']:
             raise SyntaxError("invalid mode '%s' in IS_URL" % self.mode)
         self.allowed_schemes = allowed_schemes
+        if allowed_tlds is None:
+            self.allowed_tlds = official_top_level_domains
+        else:
+            self.allowed_tlds = allowed_tlds
 
         if self.allowed_schemes:
             if prepend_scheme not in self.allowed_schemes:
@@ -2153,7 +2095,8 @@ class IS_URL(Validator):
         elif self.mode == 'http':
             subMethod = IS_HTTP_URL(error_message=self.error_message,
                                     allowed_schemes=self.allowed_schemes,
-                                    prepend_scheme=self.prepend_scheme)
+                                    prepend_scheme=self.prepend_scheme,
+                                    allowed_tlds=self.allowed_tlds)
         else:
             raise SyntaxError("invalid mode '%s' in IS_URL" % self.mode)
 
@@ -2163,12 +2106,12 @@ class IS_URL(Validator):
             try:
                 asciiValue = unicode_to_ascii_url(value, self.prepend_scheme)
             except Exception:
-                #If we are not able to convert the unicode url into a
+                # If we are not able to convert the unicode url into a
                 # US-ASCII URL, then the URL is not valid
                 return (value, translate(self.error_message))
 
             methodResult = subMethod(asciiValue)
-            #if the validation of the US-ASCII version of the value failed
+            # if the validation of the US-ASCII version of the value failed
             if not methodResult[1] is None:
                 # then return the original input value, not the US-ASCII version
                 return (value, methodResult[1])
@@ -2236,7 +2179,7 @@ class IS_TIME(Validator):
             if not value.group('s') is None:
                 s = int(value.group('s'))
             if value.group('d') == 'pm' and 0 < h < 12:
-                h = h + 12
+                h += 12
             if value.group('d') == 'am' and h == 12:
                 h = 0
             if not (h in range(24) and m in range(60) and s
@@ -2250,17 +2193,22 @@ class IS_TIME(Validator):
             pass
         return (ivalue, translate(self.error_message))
 
+
 # A UTC class.
 class UTC(datetime.tzinfo):
     """UTC"""
     ZERO = datetime.timedelta(0)
+
     def utcoffset(self, dt):
         return UTC.ZERO
+
     def tzname(self, dt):
         return "UTC"
+
     def dst(self, dt):
         return UTC.ZERO
 utc = UTC()
+
 
 class IS_DATE(Validator):
     """
@@ -2270,29 +2218,22 @@ class IS_DATE(Validator):
             INPUT(_type='text', _name='name', requires=IS_DATE())
 
     date has to be in the ISO8960 format YYYY-MM-DD
-    timezome must be None or a pytz.timezone("America/Chicago") object
     """
 
     def __init__(self, format='%Y-%m-%d',
-                 error_message='Enter date as %(format)s',
-                 timezone = None):
+                 error_message='Enter date as %(format)s'):
         self.format = translate(format)
         self.error_message = str(error_message)
-        self.timezone = timezone
         self.extremes = {}
 
     def __call__(self, value):
         ovalue = value
         if isinstance(value, datetime.date):
-            if self.timezone is not None:
-                value = value - datetime.timedelta(seconds=self.timezone*3600)
             return (value, None)
         try:
             (y, m, d, hh, mm, ss, t0, t1, t2) = \
                 time.strptime(value, str(self.format))
             value = datetime.date(y, m, d)
-            if self.timezone is not None:
-                value = self.timezone.localize(value).astimezone(utc)
             return (value, None)
         except:
             self.extremes.update(IS_DATETIME.nice(self.format))
@@ -2308,11 +2249,7 @@ class IS_DATE(Validator):
         format = format.replace('%Y', y)
         if year < 1900:
             year = 2000
-        if self.timezone is not None:
-            d = datetime.datetime(year, value.month, value.day)
-            d = d.replace(tzinfo=utc).astimezone(self.timezone)
-        else:
-            d = datetime.date(year, value.month, value.day)
+        d = datetime.date(year, value.month, value.day)
         return d.strftime(format)
 
 
@@ -2363,7 +2300,8 @@ class IS_DATETIME(Validator):
                 time.strptime(value, str(self.format))
             value = datetime.datetime(y, m, d, hh, mm, ss)
             if self.timezone is not None:
-                value = self.timezone.localize(value).astimezone(utc)
+                # TODO: https://github.com/web2py/web2py/issues/1094 (temporary solution)
+                value = self.timezone.localize(value).astimezone(utc).replace(tzinfo=None)
             return (value, None)
         except:
             self.extremes.update(IS_DATETIME.nice(self.format))
@@ -2408,12 +2346,12 @@ class IS_DATE_IN_RANGE(IS_DATE):
             (datetime.date(2010, 3, 3), 'oops')
 
     """
+
     def __init__(self,
                  minimum=None,
                  maximum=None,
                  format='%Y-%m-%d',
-                 error_message=None,
-                 timezone=None):
+                 error_message=None):
         self.minimum = minimum
         self.maximum = maximum
         if error_message is None:
@@ -2425,8 +2363,7 @@ class IS_DATE_IN_RANGE(IS_DATE):
                 error_message = "Enter date in range %(min)s %(max)s"
         IS_DATE.__init__(self,
                          format=format,
-                         error_message=error_message,
-                         timezone=timezone)
+                         error_message=error_message)
         self.extremes = dict(min=self.formatter(minimum),
                              max=self.formatter(maximum))
 
@@ -2463,6 +2400,7 @@ class IS_DATETIME_IN_RANGE(IS_DATETIME):
             (datetime.datetime(2010, 3, 3, 0, 0), 'oops')
 
     """
+
     def __init__(self,
                  minimum=None,
                  maximum=None,
@@ -2510,23 +2448,23 @@ class IS_LIST_OF(Validator):
         ivalue = value
         if not isinstance(value, list):
             ivalue = [ivalue]
-        if not self.minimum is None and len(ivalue) < self.minimum:
+        ivalue = [i for i in ivalue if str(i).strip()]
+        if self.minimum is not None and len(ivalue) < self.minimum:
             return (ivalue, translate(self.error_message) % dict(min=self.minimum, max=self.maximum))
-        if not self.maximum is None and len(ivalue) > self.maximum:
+        if self.maximum is not None and len(ivalue) > self.maximum:
             return (ivalue, translate(self.error_message) % dict(min=self.minimum, max=self.maximum))
         new_value = []
         other = self.other
         if self.other:
-            if not isinstance(other, (list,tuple)):
+            if not isinstance(other, (list, tuple)):
                 other = [other]
             for item in ivalue:
-                if item.strip():
-                    v = item
-                    for validator in other:
-                        (v, e) = validator(v)
-                        if e:
-                            return (ivalue, e)
-                    new_value.append(v)
+                v = item
+                for validator in other:
+                    (v, e) = validator(v)
+                    if e:
+                        return (ivalue, e)
+                new_value.append(v)
             ivalue = new_value
         return (ivalue, None)
 
@@ -2576,7 +2514,7 @@ def urlify(s, maxlen=80, keep_underscores=False):
     if keep_underscores:
         s = re.sub('\s+', '-', s)         # whitespace to hyphens
         s = re.sub('[^\w\-]', '', s)
-                   # strip all but alphanumeric/underscore/hyphen
+        # strip all but alphanumeric/underscore/hyphen
     else:
         s = re.sub('[\s_]+', '-', s)      # whitespace & underscores to hyphens
         s = re.sub('[^a-z0-9\-]', '', s)  # strip all but alphanumeric/hyphen
@@ -2674,7 +2612,7 @@ class ANY_OF(Validator):
         # Use the formatter of the first subvalidator
         # that validates the value and has a formatter
         for validator in self.subs:
-            if hasattr(validator, 'formatter') and validator(value)[1] != None:
+            if hasattr(validator, 'formatter') and validator(value)[1] is None:
                 return validator.formatter(value)
 
 
@@ -2707,8 +2645,8 @@ class IS_EMPTY_OR(Validator):
         if hasattr(other, 'options'):
             self.options = self._options
 
-    def _options(self):
-        options = self.other.options()
+    def _options(self, *args, **kwargs):
+        options = self.other.options(*args, **kwargs)
         if (not options or options[0][0] != '') and not self.multiple:
             options.insert(0, ('', ''))
         return options
@@ -2741,7 +2679,7 @@ class IS_EMPTY_OR(Validator):
             return self.other.formatter(value)
         return value
 
-IS_NULL_OR = IS_EMPTY_OR    # for backward compatibility
+IS_NULL_OR = IS_EMPTY_OR  # for backward compatibility
 
 
 class CLEANUP(Validator):
@@ -2768,6 +2706,7 @@ class LazyCrypt(object):
     """
     Stores a lazy password hash
     """
+
     def __init__(self, crypt, password):
         """
         crypt is an instance of the CRYPT validator,
@@ -2823,8 +2762,8 @@ class LazyCrypt(object):
         # LazyCrypt objects comparison
         if isinstance(stored_password, self.__class__):
             return ((self is stored_password) or
-                   ((self.crypt.key == stored_password.crypt.key) and
-                   (self.password == stored_password.password)))
+                    ((self.crypt.key == stored_password.crypt.key) and
+                     (self.password == stored_password.password)))
 
         if self.crypt.key:
             if ':' in self.crypt.key:
@@ -2850,6 +2789,7 @@ class LazyCrypt(object):
 
     def __ne__(self, other):
         return not self.__eq__(other)
+
 
 class CRYPT(object):
     """
@@ -2951,9 +2891,11 @@ class CRYPT(object):
         self.salt = salt
 
     def __call__(self, value):
-        value = value and value[:self.max_length]
-        if len(value) < self.min_length:
+        v = value and str(value)[:self.max_length]
+        if not v or len(v) < self.min_length:
             return ('', translate(self.error_message))
+        if isinstance(value, LazyCrypt):
+            return (value, None)
         return (LazyCrypt(self, value), None)
 
 #  entropy calculator for IS_STRONG
@@ -2968,7 +2910,7 @@ otherset = frozenset(
 
 
 def calc_entropy(string):
-    " calculates a simple entropy for a given string "
+    """ calculates a simple entropy for a given string """
     import math
     alphabet = 0    # alphabet size
     other = set()
@@ -3123,21 +3065,6 @@ class IS_STRONG(object):
             return (value, XML('<br />'.join(failures)))
         else:
             return (value, translate(self.error_message))
-
-
-class IS_IN_SUBSET(IS_IN_SET):
-
-    REGEX_W = re.compile('\w+')
-
-    def __init__(self, *a, **b):
-        IS_IN_SET.__init__(self, *a, **b)
-
-    def __call__(self, value):
-        values = self.REGEX_W.findall(str(value))
-        failures = [x for x in values if IS_IN_SET.__call__(self, x)[1]]
-        if failures:
-            return (value, translate(self.error_message))
-        return (value, None)
 
 
 class IS_IMAGE(Validator):
@@ -3479,16 +3406,18 @@ class IS_IPV4(Validator):
                     ok = True
             if not (self.is_localhost is None or self.is_localhost ==
                     (number == self.localhost)):
-                    ok = False
+                ok = False
             if not (self.is_private is None or self.is_private ==
-                    (sum([number[0] <= number <= number[1] for number in self.private]) > 0)):
-                    ok = False
+                    (sum([private_number[0] <= number <= private_number[1]
+                          for private_number in self.private]) > 0)):
+                ok = False
             if not (self.is_automatic is None or self.is_automatic ==
                     (self.automatic[0] <= number <= self.automatic[1])):
-                    ok = False
+                ok = False
             if ok:
                 return (value, None)
         return (value, translate(self.error_message))
+
 
 class IS_IPV6(Validator):
     """
@@ -3585,7 +3514,7 @@ class IS_IPV6(Validator):
             from gluon.contrib import ipaddr as ipaddress
 
         try:
-            ip = ipaddress.IPv6Address(value)
+            ip = ipaddress.IPv6Address(value.decode('utf-8'))
             ok = True
         except ipaddress.AddressValueError:
             return (value, translate(self.error_message))
@@ -3597,7 +3526,7 @@ class IS_IPV6(Validator):
                 self.subnets = [self.subnets]
             for network in self.subnets:
                 try:
-                    ipnet = ipaddress.IPv6Network(network)
+                    ipnet = ipaddress.IPv6Network(network.decode('utf-8'))
                 except (ipaddress.NetmaskValueError, ipaddress.AddressValueError):
                     return (value, translate('invalid subnet provided'))
                 if ip in ipnet:
@@ -3768,6 +3697,7 @@ class IS_IPADDRESS(Validator):
         >>> IS_IPADDRESS(subnets='invalidsubnet')('2001::8ffa:fe22:b3af')
         ('2001::8ffa:fe22:b3af', 'invalid subnet provided')
     """
+
     def __init__(
             self,
             minip='0.0.0.0',
@@ -3806,20 +3736,22 @@ class IS_IPADDRESS(Validator):
 
     def __call__(self, value):
         try:
-            import ipaddress
+            from ipaddress import ip_address as IPAddress
+            from ipaddress import IPv6Address, IPv4Address
         except ImportError:
-            from gluon.contrib import ipaddr as ipaddress
+            from gluon.contrib.ipaddr import (IPAddress, IPv4Address,
+                                              IPv6Address)
 
         try:
-            ip = ipaddress.ip_address(value)
-        except ValueError, e:
+            ip = IPAddress(value.decode('utf-8'))
+        except ValueError:
             return (value, translate(self.error_message))
 
-        if self.is_ipv4 and isinstance(ip, ipaddress.IPv6Address):
+        if self.is_ipv4 and isinstance(ip, IPv6Address):
             retval = (value, translate(self.error_message))
-        elif self.is_ipv6 and isinstance(ip, ipaddress.IPv4Address):
+        elif self.is_ipv6 and isinstance(ip, IPv4Address):
             retval = (value, translate(self.error_message))
-        elif self.is_ipv4 or isinstance(ip, ipaddress.IPv4Address):
+        elif self.is_ipv4 or isinstance(ip, IPv4Address):
             retval = IS_IPV4(
                 minip=self.minip,
                 maxip=self.maxip,
@@ -3828,8 +3760,8 @@ class IS_IPADDRESS(Validator):
                 is_private=self.is_private,
                 is_automatic=self.is_automatic,
                 error_message=self.error_message
-                )(value)
-        elif self.is_ipv6 or isinstance(ip, ipaddress.IPv6Address):
+            )(value)
+        elif self.is_ipv6 or isinstance(ip, IPv6Address):
             retval = IS_IPV6(
                 is_private=self.is_private,
                 is_link_local=self.is_link_local,
@@ -3840,7 +3772,7 @@ class IS_IPADDRESS(Validator):
                 is_teredo=self.is_teredo,
                 subnets=self.subnets,
                 error_message=self.error_message
-                )(value)
+            )(value)
         else:
             retval = (value, translate(self.error_message))
 

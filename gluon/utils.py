@@ -64,7 +64,12 @@ else:
         except (ImportError, ValueError):
             HAVE_PBKDF2 = False
 
+HAVE_COMPARE_DIGEST = False
+if hasattr(hmac, 'compare_digest'):
+    HAVE_COMPARE_DIGEST = True
+
 logger = logging.getLogger("web2py")
+
 
 def AES_new(key, IV=None):
     """ Returns an AES cipher object and random IV if None specified """
@@ -76,17 +81,18 @@ def AES_new(key, IV=None):
 
 def compare(a, b):
     """ Compares two strings and not vulnerable to timing attacks """
-    if len(a) != len(b):
-        return False
-    result = 0
-    for x, y in zip(a, b):
-        result |= ord(x) ^ ord(y)
+    if HAVE_COMPARE_DIGEST:
+        return hmac.compare_digest(a, b)
+    result = len(a) ^ len(b)
+    for i in xrange(len(b)):
+		result |= ord(a[i%len(a)]) ^ ord(b[i])
     return result == 0
 
 
 def md5_hash(text):
     """ Generates a md5 hash with the given text """
     return md5(text).hexdigest()
+
 
 def simple_hash(text, key='', salt='', digest_alg='md5'):
     """
@@ -141,6 +147,7 @@ DIGEST_ALG_BY_SIZE = {
     512 / 4: 'sha512',
 }
 
+
 def get_callable_argspec(fn):
     if inspect.isfunction(fn) or inspect.ismethod(fn):
         inspectable = fn
@@ -152,6 +159,7 @@ def get_callable_argspec(fn):
         inspectable = fn
     return inspect.getargspec(inspectable)
 
+
 def pad(s, n=32, padchar=' '):
     return s + (32 - len(s) % 32) * padchar
 
@@ -162,7 +170,7 @@ def secure_dumps(data, encryption_key, hash_key=None, compression_level=None):
     dump = pickle.dumps(data, pickle.HIGHEST_PROTOCOL)
     if compression_level:
         dump = zlib.compress(dump, compression_level)
-    key = pad(encryption_key[:32])
+    key = pad(encryption_key)[:32]
     cipher, IV = AES_new(key)
     encrypted_data = base64.urlsafe_b64encode(IV + cipher.encrypt(pad(dump)))
     signature = hmac.new(hash_key, encrypted_data).hexdigest()
@@ -170,7 +178,7 @@ def secure_dumps(data, encryption_key, hash_key=None, compression_level=None):
 
 
 def secure_loads(data, encryption_key, hash_key=None, compression_level=None):
-    if not ':' in data:
+    if ':' not in data:
         return None
     if not hash_key:
         hash_key = sha1(encryption_key).hexdigest()
@@ -178,7 +186,7 @@ def secure_loads(data, encryption_key, hash_key=None, compression_level=None):
     actual_signature = hmac.new(hash_key, encrypted_data).hexdigest()
     if not compare(signature, actual_signature):
         return None
-    key = pad(encryption_key[:32])
+    key = pad(encryption_key)[:32]
     encrypted_data = base64.urlsafe_b64decode(encrypted_data)
     IV, encrypted_data = encrypted_data[:16], encrypted_data[16:]
     cipher, _ = AES_new(key, IV=IV)
@@ -350,4 +358,3 @@ def getipaddrinfo(host):
                 and isinstance(addrinfo[4][0], basestring)]
     except socket.error:
         return []
-

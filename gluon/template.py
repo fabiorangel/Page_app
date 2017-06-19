@@ -279,7 +279,7 @@ class TemplateParser(object):
         self.context = context
 
         # allow optional alternative delimiters
-        
+
         if delimiters != self.default_delimiters:
             escaped_delimiters = (escape(delimiters[0]),
                                   escape(delimiters[1]))
@@ -897,6 +897,9 @@ def render(content="hello world",
         # Add it to the context so we can use it.
         if not 'NOESCAPE' in context:
             context['NOESCAPE'] = NOESCAPE
+
+    if isinstance(content, unicode):
+        content = content.encode('utf8')
 
     # save current response class
     if context and 'response' in context:
