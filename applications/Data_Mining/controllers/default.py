@@ -39,6 +39,7 @@ def index():
         try:
             query2 = db.ranking.find({"passwd": int(passwd)})[0]
             points_open = query2['points_open']
+            max_open = max(query2['points_open'])
             points_hidden = query2['points_hidden']
 
         except IndexError:
@@ -53,7 +54,8 @@ def index():
             open_auc = metrics.roc_auc_score(y[:len(y)/2], ypred[:len(y)/2])
             closed_auc = metrics.roc_auc_score(y[len(y)/2:], ypred[len(y)/2:])
             db.ranking.update({"passwd": int(passwd)},{'points_hidden': points_hidden.append(closed_auc)},{'points_open': points_open.append(closed_auc)})
-
+            if max_open < open_auc:
+                errormsg = "Seu score foi melhorado!"
 
         except Exception as e:
             errormsg = "formato inválido"
