@@ -22,7 +22,7 @@ def index():
     nomes = []
 
     for group in query:
-        pontos.append(max(group['points_open']))
+        pontos.append(max([float(x) for x in group['points_open']]))
         nomes.append(group['dupla'])
 
     pontos, nomes = zip(*sorted(zip(pontos, nomes)))
@@ -37,9 +37,10 @@ def index():
     if passwd != None:
         try:
             query2 = db.ranking.find({"passwd": int(passwd)})[0]
-            points_open = query2['points_open']
-            max_open = max(query2['points_open'])
-            points_hidden = query2['points_hidden']
+            points_open = [float(x) for x in query2['points_open']]
+            max_open = max(points_open)
+            points_hidden = [float(x) for x in query2['points_hidden']]
+            dupla = query2['dupla']
 
         except IndexError:
             errormsg = "Grupo inexistente. Verifique a chave."
@@ -52,14 +53,16 @@ def index():
             y = [float(x) for x in open(os.path.dirname(os.path.abspath(__file__))+'/../labels.csv').readlines()]
             open_auc = metrics.roc_auc_score(y[:len(y)/2], ypred[:len(y)/2])
             closed_auc = metrics.roc_auc_score(y[len(y)/2:], ypred[len(y)/2:])
-            db.ranking.update({"passwd": int(passwd)},{'points_hidden': points_hidden.append(closed_auc)},{'points_open': points_open.append(closed_auc)})
+            points_hidden.append(str(closed_auc))
+            points_open.append(str(closed_auc))
+	    db.ranking.update({"passwd": int(passwd)},{"passwd": int(passwd), 'dupla':dupla, 'points_hidden': [str(x) for x in points_hidden], 'points_open': [str(x) for x in points_open]}, upsert=False)
             if max_open < open_auc:
                 errormsg = "Seu score foi melhorado!"
             else:
-		errormsg = "Sua pontuação foi %d. Seu score continuou o mesmo."%(open_auc)
+		errormsg = "Sua pontuação foi %f. Seu score continuou o mesmo."%(open_auc)
 
         except Exception as e:
-            errormsg = "formato inválido"
+            errormsg = "formato inválido: "+str(e)
             pass
 
     return dict(nomes=nomes, pontos=pontos, errormsg=errormsg)
