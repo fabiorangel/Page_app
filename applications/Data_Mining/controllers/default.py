@@ -29,7 +29,6 @@ def index():
     pontos = pontos[::-1]
     nomes = nomes[::-1]
 
-    
     passwd = request.vars.password
     f = request.vars.fileToUpload
 
@@ -56,6 +55,8 @@ def index():
             db.ranking.update({"passwd": int(passwd)},{'points_hidden': points_hidden.append(closed_auc)},{'points_open': points_open.append(closed_auc)})
             if max_open < open_auc:
                 errormsg = "Seu score foi melhorado!"
+            else:
+		errormsg = "Sua pontuação foi %d. Seu score continuou o mesmo."%(open_auc)
 
         except Exception as e:
             errormsg = "formato inválido"
